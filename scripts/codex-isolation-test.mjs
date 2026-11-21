@@ -31,6 +31,21 @@ enabled = true
   assert.equal(lstatSync(join(destination, "auth.json")).isSymbolicLink(), true);
   assert.equal(resolve(destination, readlinkSync(join(destination, "auth.json"))), resolve(source, "auth.json"));
 
+  execFileSync(process.execPath, [join(root, "scripts/prepare-codex-home.mjs"), source, destination], {
+    env: { ...process.env, BRIDGE_CODEX_MODEL: "bridge-model", BRIDGE_CODEX_REASONING_EFFORT: "medium" },
+  });
+  const overridden = readFileSync(join(destination, "config.toml"), "utf8");
+  assert.match(overridden, /^model = "bridge-model"$/m);
+  assert.match(overridden, /^model_reasoning_effort = "medium"$/m);
+  assert.doesNotMatch(overridden, /configured-model|"high"/);
+  assert.match(readFileSync(join(source, "config.toml"), "utf8"), /model_reasoning_effort = "high"/);
+  assert.throws(
+    () => execFileSync(process.execPath, [join(root, "scripts/prepare-codex-home.mjs"), source, destination], {
+      env: { ...process.env, BRIDGE_CODEX_REASONING_EFFORT: "high\nnotify = 1" }, stdio: "pipe",
+    }),
+    /Command failed/,
+  );
+
   unlinkSync(join(destination, "auth.json"));
   writeFileSync(join(destination, "auth.json"), "not-json\n", { mode: 0o600 });
   assert.throws(
@@ -48,4 +63,4 @@ enabled = true
   rmSync(temporary, { recursive: true, force: true });
 }
 
-console.log("Delegated Codex home isolation test passed: auth linked, model defaults preserved, MCPs/plugins/hooks removed.");
+console.log("Delegated Codex home isolation test passed: auth linked, model defaults preserved, bridge model/effort overrides applied, MCPs/plugins/hooks removed.");

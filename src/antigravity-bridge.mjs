@@ -112,7 +112,10 @@ function runAntigravityAttempt({ prompt, cwd, mode, model, timeoutSeconds, permi
   const modelSelection = resolveAntigravityModelSelection({
     model,
     advertisedModels: AGY_CAPABILITIES.models,
+    advertisedLabels: AGY_CAPABILITIES.modelLabels,
     effortSupported: AGY_CAPABILITIES.effort,
+    effortLevels: AGY_CAPABILITIES.effortLevels,
+    settingsSupported: AGY_CAPABILITIES.settings,
     requireAdvertisedRoute,
   });
   if (modelSelection.model && !AGY_CAPABILITIES.model) throw new Error(`Installed Antigravity ${AGY_CAPABILITIES.version} cannot select a model.`);
@@ -148,6 +151,8 @@ function runAntigravityAttempt({ prompt, cwd, mode, model, timeoutSeconds, permi
   } else if (AGY_CAPABILITIES.sandbox) args.push("--sandbox");
   if (modelSelection.model) args.push("--model", modelSelection.model);
   if (modelSelection.effort) args.push("--effort", modelSelection.effort);
+  // Orchestrator planner/executor apply to this session only; the user's settings.json is untouched.
+  if (modelSelection.settings) args.push("--settings", JSON.stringify(modelSelection.settings));
   if (conversationId) args.push("--conversation", conversationId);
 
   return new Promise((resolvePromise, rejectPromise) => {
@@ -245,6 +250,7 @@ async function runAntigravity(input) {
           invocationModel: result.modelSelection?.model || model,
           effort: result.modelSelection?.effort || null,
           effortSource: result.modelSelection?.effortSource || null,
+          orchestrator: result.modelSelection?.orchestrator || null,
           fallbackUsed: machineModelPolicy.source === "fallback" || index > 0,
           attemptedModels,
           fallbackModels,
@@ -288,7 +294,7 @@ const sharedInput = {
     "review uses Antigravity plan mode; work uses accept-edits. Standard calls run inside Antigravity's terminal sandbox.",
   ),
   model: z.string().min(1).optional().describe(
-    "Optional Antigravity model label. Omit it to use the model selected in the user's Antigravity settings.",
+    "Optional Antigravity model route, e.g. gemini-4-neon-xhigh, or orchestrator:<planner-route>+<executor-route> such as orchestrator:gemini-4-neon-xhigh+gemini-4-hydrogen-xhigh. Omit it to use AGY_MODEL or the model selected in the user's Antigravity settings.",
   ),
   fallbackModels: z.array(z.string().trim().min(1)).max(5).optional().describe(
     "Ordered Antigravity models to try only after a recognized overload. Omit to use the machine-local fallback policy; pass [] to disable it.",

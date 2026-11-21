@@ -1,5 +1,12 @@
 # Codex ↔ Claude Code ↔ Antigravity ↔ local model bridge
 
+> **ain-soph fork, branch `serving`.** Adds Antigravity CLI 1.5.14 support: `xhigh`/`max` effort routes
+> (e.g. `gemini-4-neon-xhigh`) and Orchestrator routes `orchestrator:<planner-route>+<executor-route>`
+> (e.g. `orchestrator:gemini-4-neon-xhigh+gemini-4-hydrogen-xhigh`), passed to `agy` as `--model <orchestrator id>`
+> plus a session-only `--settings '{"orchestrator":{"planner":"<label>","executor":"<label>"}}'`. Also
+> `BRIDGE_CODEX_MODEL` / `BRIDGE_CODEX_REASONING_EFFORT` to pin the delegated Codex model and reasoning effort
+> without editing `~/.codex/config.toml`. Enable with `AGY_MODEL=orchestrator:...` and those variables in the bridge environment.
+
 This project connects cloud coding agents and an optional local reviewer through MCP without a hosted relay:
 
 - **Claude Code → Codex:** Claude loads `.mcp.json`, which starts Codex's native MCP server and exposes `codex` and `codex-reply`.
@@ -831,7 +838,7 @@ The deny policy is read for every new direct MCP call and every provider turn st
 
 A machine deny is stronger than a per-request override. For example, `allowFable: true` cannot use Fable while `claude fable` is disabled globally. After Fable is re-enabled globally, the existing safety rule still requires the current user request to ask for Fable explicitly. When a disabled primary has an allowed configured fallback, the bridge promotes that fallback before launching the provider and emits a routing narrative. When every requested candidate is disabled, the call fails immediately with a command to inspect or repair the policy instead of waiting for a provider timeout.
 
-The bridge can inspect Claude's saved/environment model and Codex's top-level `config.toml`/environment model. Antigravity exposes an environment-selected model through `AGY_MODEL`, `ANTIGRAVITY_MODEL`, or `GEMINI_MODEL`; its opaque app-selected default cannot be named before launch, so set one of those variables or pass an explicit model when a strict Antigravity default guarantee is required.
+The bridge can inspect Claude's saved/environment model and Codex's top-level `config.toml`/environment model. Antigravity exposes an environment-selected model through `AGY_MODEL`, `ANTIGRAVITY_MODEL`, or `GEMINI_MODEL`; its opaque app-selected default cannot be named before launch, so set one of those variables or pass an explicit model when a strict Antigravity default guarantee is required. Antigravity routes may carry an effort suffix (`-low`, `-medium`, `-high`, `-xhigh`, `-max`, as advertised by `agy models`); an Orchestrator route is written `orchestrator:<planner-route>+<executor-route>` and is translated to the advertised `Orchestrator (<planner family>)` model plus session-only `--settings` naming the planner and executor labels. The delegated Codex home copies the model and reasoning effort from the source `config.toml`; `BRIDGE_CODEX_MODEL` and `BRIDGE_CODEX_REASONING_EFFORT` override them for bridge sessions only.
 
 #### Explicit Fable opt-in
 

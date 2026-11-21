@@ -4,10 +4,16 @@ import { homedir } from "node:os";
 import { basename, dirname, resolve } from "node:path";
 
 const DEFAULT_CACHE = resolve(homedir(), ".cache/local-agent-bridge/provider-capabilities.json");
-const CAPABILITY_SCHEMA_VERSION = 7;
+const CAPABILITY_SCHEMA_VERSION = 8;
 
 function flags(help) {
   return new Set([...String(help || "").matchAll(/(?:^|\s)(--[a-z0-9][a-z0-9-]*)/gi)].map((match) => match[1]));
+}
+
+// agy 1.5.x prints e.g. "--effort  Reasoning effort for the current CLI session (low|medium|high|xhigh|max)".
+export function parseEffortLevels(help) {
+  const match = String(help || "").match(/--effort\b[^\n]*\(([a-z]+(?:\|[a-z]+)+)\)/i);
+  return match ? match[1].toLowerCase().split("|") : null;
 }
 
 export function parseProviderHelp(provider, { version = "unknown", mainHelp = "", newHelp = "", resumeHelp = "" } = {}) {
@@ -37,7 +43,8 @@ export function parseProviderHelp(provider, { version = "unknown", mainHelp = ""
     provider, version,
     print: main.has("--print"), printTimeout: main.has("--print-timeout"), mode: main.has("--mode"),
     logFile: main.has("--log-file"), addDir: main.has("--add-dir"),
-    model: main.has("--model"), effort: main.has("--effort"), sandbox: main.has("--sandbox"),
+    model: main.has("--model"), effort: main.has("--effort"), effortLevels: parseEffortLevels(mainHelp),
+    settings: main.has("--settings"), sandbox: main.has("--sandbox"),
     yolo: main.has("--dangerously-skip-permissions"),
     conversation: main.has("--conversation") || main.has("--conversation-id") || main.has("--continue"),
   };
@@ -56,6 +63,17 @@ export function parseAntigravityModels(output) {
     .map((line) => line.match(/(?:^|[\s*•])([a-z0-9][a-z0-9._]*(?:-[a-z0-9][a-z0-9._]*)+)(?=$|[\s(])/i)?.[1] || null)
     .filter(Boolean);
   return [...new Set(models)];
+}
+
+// `agy models` prints one "<id>\t<label>" row per model, e.g.
+// "gemini-4-neon-xhigh\tGemini 4 Neon (XHigh)". Orchestrator settings take labels, not IDs.
+export function parseAntigravityModelLabels(output) {
+  const labels = {};
+  for (const line of String(output || "").split("\n")) {
+    const match = line.match(/^\s*[*\-•]?\s*([a-z0-9][a-z0-9._]*(?:-[a-z0-9][a-z0-9._]*)+)(?:\t+|\s{2,})(\S.*?)\s*$/i);
+    if (match && !(match[1] in labels)) labels[match[1]] = match[2];
+  }
+  return labels;
 }
 
 export function probeProviderCapabilities({ provider, binary }) {
@@ -82,6 +100,9 @@ export function probeProviderCapabilities({ provider, binary }) {
     ...parsed,
     models: modelsResult.ok
       ? parseAntigravityModels(modelsResult.stdout)
+      : null,
+    modelLabels: modelsResult.ok
+      ? parseAntigravityModelLabels(modelsResult.stdout)
       : null,
   };
 }

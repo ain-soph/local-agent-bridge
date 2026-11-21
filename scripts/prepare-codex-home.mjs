@@ -45,6 +45,21 @@ try {
       if (match && safeTopLevelKeys.has(match[1])) safeLines.push(line.trim());
     }
   }
+  // Bridge-only overrides: the delegated Codex can run a different model or reasoning effort
+  // than the user's interactive Codex without editing the source config.toml.
+  const overrides = [
+    ["model", process.env.BRIDGE_CODEX_MODEL, /^[A-Za-z0-9._:/-]+$/],
+    ["model_reasoning_effort", process.env.BRIDGE_CODEX_REASONING_EFFORT, /^(none|minimal|low|medium|high|xhigh)$/],
+  ];
+  for (const [key, rawValue, pattern] of overrides) {
+    const value = typeof rawValue === "string" ? rawValue.trim() : "";
+    if (!value) continue;
+    if (!pattern.test(value)) throw new Error(`Invalid ${key} override for the delegated Codex home: ${value}`);
+    const index = safeLines.findIndex((line) => line.match(/^([A-Za-z0-9_-]+)\s*=/)?.[1] === key);
+    const line = `${key} = ${JSON.stringify(value)}`;
+    if (index === -1) safeLines.push(line);
+    else safeLines[index] = line;
+  }
   const config = join(destination, "config.toml");
   const configTemporary = `${config}.${process.pid}.tmp`;
   writeFileSync(configTemporary, `${safeLines.join("\n")}\n`, { mode: 0o600 });

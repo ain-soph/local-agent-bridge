@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { parseAntigravityModels, parseProviderHelp } from "../src/provider-cli-capabilities.mjs";
+import { parseAntigravityModelLabels, parseAntigravityModels, parseProviderHelp } from "../src/provider-cli-capabilities.mjs";
 
 const modernCodex = parseProviderHelp("codex", {
   version: "1", newHelp: "--json --model --sandbox --cd --skip-git-repo-check --config",
@@ -40,5 +40,18 @@ assert.deepEqual(parseAntigravityModels(`Available models:\n  * gemini-3.6-flash
   "gemini-3.6-flash-medium",
   "claude-sonnet-4-6",
 ]);
+
+const agy1514 = parseProviderHelp("antigravity", {
+  mainHelp: "  --effort                        Reasoning effort for the current CLI session (low|medium|high|xhigh|max)\n  --settings                      Settings for this session only\n  --model  Model\n",
+});
+assert.deepEqual(agy1514.effortLevels, ["low", "medium", "high", "xhigh", "max"]);
+assert.equal(agy1514.settings, true);
+assert.equal(oldAntigravity.settings, false);
+assert.equal(oldAntigravity.effortLevels, null);
+assert.deepEqual(parseAntigravityModelLabels("Fetching available models...\ngemini-4-neon-xhigh\tGemini 4 Neon (XHigh)\ngemini-pro-orchestrator-neon\tOrchestrator (Neon)\ngpt-oss-120b-medium  GPT-OSS 120B (Medium)\n"), {
+  "gemini-4-neon-xhigh": "Gemini 4 Neon (XHigh)",
+  "gemini-pro-orchestrator-neon": "Orchestrator (Neon)",
+  "gpt-oss-120b-medium": "GPT-OSS 120B (Medium)",
+});
 
 console.log("Provider capability matrix tests passed for modern and legacy Codex, Claude, and Antigravity CLIs.");
