@@ -1,11 +1,15 @@
 # Codex ↔ Claude Code ↔ Antigravity ↔ local model bridge
 
-> **ain-soph fork, branch `serving`.** Adds Antigravity CLI 1.5.14 support: `xhigh`/`max` effort routes
-> (e.g. `gemini-4-neon-xhigh`) and Orchestrator routes `orchestrator:<planner-route>+<executor-route>`
-> (e.g. `orchestrator:gemini-4-neon-xhigh+gemini-4-hydrogen-xhigh`), passed to `agy` as `--model <orchestrator id>`
-> plus a session-only `--settings '{"orchestrator":{"planner":"<label>","executor":"<label>"}}'`. Also
-> `BRIDGE_CODEX_MODEL` / `BRIDGE_CODEX_REASONING_EFFORT` to pin the delegated Codex model and reasoning effort
-> without editing `~/.codex/config.toml`. Enable with `AGY_MODEL=orchestrator:...` and those variables in the bridge environment.
+> **ain-soph fork (`serving` branch, based on upstream `c0f9486`).** What differs from upstream:
+>
+> | Change | Why | Enable / default | Effect |
+> |---|---|---|---|
+> | Antigravity `-xhigh` / `-max` effort routes, checked against `agy --help` levels | agy 1.5.14 adds xhigh/max; upstream only parsed low/medium/high | route suffix, e.g. `gemini-4-neon-xhigh` | `--model gemini-4-neon --effort xhigh` |
+> | Antigravity Orchestrator routes `orchestrator:<planner-route>+<executor-route>` | agy 1.5.14 sets planner/executor model + effort in the `orchestrator` setting (labels, not IDs) | `AGY_MODEL` or per-call `model` (off) | `--model <Orchestrator id> --settings '{"orchestrator":{...}}'`, session only |
+> | Capability probe: `--settings`, effort levels, `agy models` labels (cache schema 8) | needed by the two rows above | always | — |
+> | `BRIDGE_CODEX_MODEL` / `BRIDGE_CODEX_REASONING_EFFORT` | delegated Codex can differ from interactive Codex without editing `~/.codex/config.toml` | env (off) | overrides the delegated `config.toml` |
+>
+> Upstream PRs: none.
 
 This project connects cloud coding agents and an optional local reviewer through MCP without a hosted relay:
 
