@@ -24,6 +24,8 @@ try {
   git(repository, "commit", "-m", "Initial source");
   git(repository, "remote", "add", "origin", "https://example.invalid/owner/repository.git");
   const sourceHead = git(repository, "rev-parse", "HEAD");
+  git(repository, "update-ref", "refs/remotes/origin/main", sourceHead);
+  git(repository, "update-ref", "refs/remotes/origin/feature-remote-only", sourceHead);
   const sourceGitDirectory = realpathSync(join(repository, ".git"));
   const adoptedSource = adoptExistingWriterCheckout({ workspace: repository });
   assert.equal(adoptedSource.strategy, "self-contained");
@@ -53,6 +55,23 @@ try {
   assert.notEqual(writerGitDirectory, sourceGitDirectory);
   assert.equal(git(checkout.path, "remote", "get-url", "origin"), "https://example.invalid/owner/repository.git");
   assert.equal(git(checkout.path, "branch", "--show-current"), "codex/issue-82-private-writer-checkouts");
+  assert.equal(git(checkout.path, "rev-parse", "refs/remotes/origin/feature-remote-only"), sourceHead);
+
+  const bareOrigin = join(temporary, "origin.git");
+  git(temporary, "init", "--bare", "--initial-branch=main", bareOrigin);
+  git(repository, "push", "--quiet", bareOrigin, "HEAD:refs/heads/main", "HEAD:refs/heads/origin-only-branch");
+  const localOriginRepository = join(temporary, "local-origin-repository");
+  git(temporary, "clone", "--quiet", "--single-branch", bareOrigin, localOriginRepository);
+  assert.notEqual(spawnSync("git", ["rev-parse", "--verify", "--quiet", "refs/remotes/origin/origin-only-branch"], { cwd: localOriginRepository }).status, 0);
+  const localOriginCheckout = prepareWriterCheckout({
+    workspace: localOriginRepository,
+    taskId: "all-origin-branches",
+    branch: "task/all-origin-branches",
+    checkoutRoot,
+  });
+  assert.equal(git(localOriginCheckout.path, "remote", "get-url", "origin"), bareOrigin);
+  assert.equal(git(localOriginCheckout.path, "rev-parse", "refs/remotes/origin/origin-only-branch"), sourceHead);
+  assert.equal(git(localOriginCheckout.path, "rev-parse", "refs/remotes/origin/main"), sourceHead);
   assert.equal(git(checkout.path, "rev-parse", "HEAD"), sourceHead);
   assert.deepEqual(checkout.cleanup, { strategy: "remove-directory", path: checkout.path });
   assert.throws(() => prepareWriterCheckout({

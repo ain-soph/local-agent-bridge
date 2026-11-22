@@ -4,6 +4,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 const SAFE_BRANCH = /^[A-Za-z0-9._/-]+$/;
 const SAFE_TASK_ID = /^[A-Za-z0-9._-]+$/;
+const ORIGIN_FETCH_TIMEOUT_MS = 60_000;
 
 function git(cwd, args, { errorMessage, trim = true } = {}) {
   const result = spawnSync("git", args, {
@@ -17,11 +18,12 @@ function git(cwd, args, { errorMessage, trim = true } = {}) {
   return trim ? result.stdout.trim() : result.stdout;
 }
 
-function optionalGit(cwd, args) {
+function optionalGit(cwd, args, { timeout } = {}) {
   const result = spawnSync("git", args, {
     cwd,
     encoding: "utf8",
     env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+    ...(timeout ? { timeout, killSignal: "SIGTERM" } : {}),
   });
   return result.status === 0 ? result.stdout.trim() : null;
 }
@@ -128,8 +130,14 @@ export function prepareWriterCheckout({
     git(source, ["clone", "--no-hardlinks", "--no-checkout", "--no-tags", "--origin", "origin", source, path], {
       errorMessage: `Unable to create private writer checkout at ${path}.`,
     });
-    if (canonicalOrigin) git(path, ["remote", "set-url", "origin", canonicalOrigin]);
-    else git(path, ["remote", "remove", "origin"]);
+    // The clone maps the source's local branches to origin/*. Also copy the source's own view of
+    // its origin (every remote-tracking branch, no network), then refresh it from the canonical
+    // origin when reachable, so the writer sees all origin branches and not only the checked-out one.
+    if (canonicalOrigin) {
+      optionalGit(path, ["fetch", "--no-tags", "--quiet", source, "+refs/remotes/origin/*:refs/remotes/origin/*"]);
+      git(path, ["remote", "set-url", "origin", canonicalOrigin]);
+      optionalGit(path, ["fetch", "--no-tags", "--quiet", "origin"], { timeout: ORIGIN_FETCH_TIMEOUT_MS });
+    } else git(path, ["remote", "remove", "origin"]);
     git(path, ["checkout", "--no-track", "-B", branch, baseSha], {
       errorMessage: `Unable to create writer branch ${branch} at ${baseSha}.`,
     });
