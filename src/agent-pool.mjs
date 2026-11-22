@@ -52,6 +52,21 @@ function workspaceHead(workspace) {
   return /^[0-9a-f]{40}$/i.test(sha) ? sha : null;
 }
 
+// How much longer the MCP client waits than the provider's own turn limit. Every
+// provider adapter enforces turnTimeoutSeconds itself, stops its CLI and returns a
+// definite timeout error; this margin lets that shutdown (SIGTERM, a grace period,
+// SIGKILL) finish before the client gives up and must call the turn indeterminate.
+export const PROVIDER_DEADLINE_GRACE_MS = 60_000;
+
+// The client-side deadline for one provider call, derived only from the turn
+// configuration: turnTimeoutSeconds per permitted model attempt plus the grace.
+// It is a fixed wall-clock deadline. Progress notifications neither extend nor
+// replace it, so a provider that stays silent for most of a legitimate turn (one
+// long command, such as a GPU queue wait) is not cut off early.
+export function providerCallTimeoutMs({ turnTimeoutSeconds, fallbackSlots = 0, graceMs = PROVIDER_DEADLINE_GRACE_MS }) {
+  return Math.ceil(turnTimeoutSeconds * 1000 * (1 + fallbackSlots) + graceMs);
+}
+
 export function providerFallbackSlots(agent, modelFallbacks = {}) {
   if (!["claude", "codex", "antigravity", "ollama", "docker"].includes(agent)) return 0;
   if (Array.isArray(modelFallbacks[agent])) return modelFallbacks[agent].length;
@@ -129,8 +144,8 @@ export function createAgentPool({
   handoffPath = null,
   githubReview = null,
   githubBuilder = null,
-  requestTimeoutMs = 4 * 60 * 60 * 1000 + 5 * 60 * 1000,
   turnTimeoutSeconds = 600,
+  providerDeadlineGraceMs = PROVIDER_DEADLINE_GRACE_MS,
   autonomous = false,
   writableRoots = [],
   onTiming = async () => {},
@@ -577,6 +592,7 @@ export function createAgentPool({
           githubBuilderBridgePath: resolve(root, "src/github-builder-bridge.mjs"),
           playwrightBridgePath: resolve(root, "scripts/playwright-mcp.sh"),
           writableRoots,
+          timeoutSeconds: turnTimeoutSeconds,
         });
       } else if (agent === "antigravity") {
         let antigravityPrompt = effectiveGithubReview
@@ -619,22 +635,25 @@ export function createAgentPool({
       }
       request._meta = { progressToken: `${agent}-${Date.now()}` };
       const fallbackSlots = providerFallbackSlots(agent, modelFallbacks);
-      const maxTotalTimeoutMs = requestTimeoutMs * (1 + fallbackSlots);
+      const callTimeoutMs = providerCallTimeoutMs({ turnTimeoutSeconds, fallbackSlots, graceMs: providerDeadlineGraceMs });
+      const callOptions = {
+        timeout: callTimeoutMs,
+        maxTotalTimeout: callTimeoutMs,
+        resetTimeoutOnProgress: false,
+        onprogress: (progress) => onProgress({
+          at: new Date().toISOString(),
+          progress: progress.progress,
+          total: progress.total,
+          summary: progress.message || null,
+        }),
+      };
       const reviewEvidenceNotBefore = new Date().toISOString();
       let result;
       try {
-        result = await client.callTool(request, undefined, {
-          timeout: requestTimeoutMs,
-          maxTotalTimeout: maxTotalTimeoutMs,
-          resetTimeoutOnProgress: true,
-          onprogress: (progress) => onProgress({
-            at: new Date().toISOString(),
-            progress: progress.progress,
-            total: progress.total,
-            summary: progress.message || null,
-          }),
-        });
+        result = await client.callTool(request, undefined, callOptions);
       } catch (error) {
+        // Only this backstop can produce an MCP timeout: the provider did not answer
+        // even after its own limit plus the grace, so its execution state is unknown.
         if (/timed out|timeout|transport closed|connection closed/i.test(error?.message || String(error))) {
           error.indeterminate = true;
         }
@@ -661,17 +680,7 @@ export function createAgentPool({
             // envelope is being rewritten.
             const repairRequest = antigravityRequestFor(repairPrompt, conversationId, { verificationCommands: [] });
             repairRequest._meta = { progressToken: `antigravity-delivery-repair-${Date.now()}` };
-            const repairResult = await client.callTool(repairRequest, undefined, {
-              timeout: requestTimeoutMs,
-              maxTotalTimeout: maxTotalTimeoutMs,
-              resetTimeoutOnProgress: true,
-              onprogress: (progress) => onProgress({
-                at: new Date().toISOString(),
-                progress: progress.progress,
-                total: progress.total,
-                summary: progress.message || null,
-              }),
-            });
+            const repairResult = await client.callTool(repairRequest, undefined, callOptions);
             if (repairResult.isError) throw new Error(`antigravity delivery repair failed: ${textFrom(repairResult)}`);
             return { message: textFrom(repairResult), conversationId: sessionFrom(agent, repairResult) };
           },

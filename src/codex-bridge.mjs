@@ -15,6 +15,25 @@ import { negotiateProviderCapabilities } from "./provider-cli-capabilities.mjs";
 
 const WORKSPACE_ROOT = realpathSync(process.env.BRIDGE_WORKSPACE_ROOT || process.env.BRIDGE_ROOT || process.cwd());
 const MAX_OUTPUT_CHARS = 200_000;
+// How long a stopped Codex gets to finish after SIGTERM before SIGKILL.
+const TERMINATE_GRACE_MS = positiveInteger(process.env.CODEX_BRIDGE_TERMINATE_GRACE_MS, 10_000);
+// Liveness only: Codex prints nothing while one long command runs (for example a
+// GPU queue wait). Callers must not rely on these to keep a call alive.
+const HEARTBEAT_MS = 60_000;
+// Codex processes owned by in-flight calls, so a cancelled call or a closed client
+// stops them instead of leaving them running unobserved.
+const activeCodexRuns = new Set();
+
+function positiveInteger(value, fallback) {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function logLine(message) {
+  try {
+    process.stderr.write(`[codex-bridge ${new Date().toISOString()}] ${message}\n`);
+  } catch {}
+}
 function overloadRetryPrompt(originalPrompt) {
   return `A previous model attempt failed because that model was overloaded. Inspect the workspace before acting so you preserve any completed work, then complete this original request:\n\n${originalPrompt}`;
 }
@@ -96,7 +115,16 @@ function eventSummary(event) {
   return null;
 }
 
-function runCodexAttempt({ prompt, cwd, sandbox, approvalPolicy, config = {}, model, threadId, verificationCommands = [], onProgress }) {
+function turnLimitError(turnLimit, exit) {
+  const stopped = exit
+    ? ` The bridge stopped Codex with ${exit}.`
+    : " The limit was reached before the next Codex attempt could start.";
+  const error = new Error(`Codex delegation timed out after the ${turnLimit.budgetSeconds} s turn limit (turnTimeoutSeconds ${turnLimit.timeoutSeconds} s x ${turnLimit.attempts} model attempt${turnLimit.attempts === 1 ? "" : "s"}).${stopped} Commands Codex started end with it unless they were detached; partial work stays in the workspace. Use a larger turnTimeoutSeconds (up to 14400) for a longer turn.`);
+  error.turnTimeout = true;
+  return error;
+}
+
+function runCodexAttempt({ prompt, cwd, sandbox, approvalPolicy, config = {}, model, threadId, verificationCommands = [], onProgress, turnLimit = null, signal = null }) {
   if (process.env.CODEX_BRIDGE_ACTIVE === "1") {
     throw new Error("Nested Codex bridge invocation blocked to prevent an agent loop.");
   }
@@ -126,11 +154,61 @@ function runCodexAttempt({ prompt, cwd, sandbox, approvalPolicy, config = {}, mo
 
   return new Promise((resolvePromise, rejectPromise) => {
     const wallStartedAt = Date.now();
+    if (turnLimit && Date.now() >= turnLimit.deadlineAt) {
+      rejectPromise(turnLimitError(turnLimit, null));
+      return;
+    }
+    if (signal?.aborted) {
+      rejectPromise(new Error("Codex call was cancelled by the MCP client before Codex started."));
+      return;
+    }
     const child = spawn(CODEX_BIN, args, {
       cwd: actualCwd,
       env: { ...process.env, CODEX_BRIDGE_ACTIVE: "1" },
       stdio: ["ignore", "pipe", "pipe"],
     });
+    // Set when the bridge itself stops Codex: at the turn limit, on cancellation,
+    // or when the MCP client disconnects. Only the Codex process is signalled;
+    // Codex ends the commands it started, while detached background jobs keep running.
+    let stopping = null;
+    let deadlineTimer = null;
+    let killTimer = null;
+    const stop = (reason) => {
+      if (stopping || child.exitCode !== null || child.signalCode !== null) return;
+      stopping = { reason, signals: ["SIGTERM"] };
+      const what = reason === "turn_limit"
+        ? `Codex reached the ${turnLimit.budgetSeconds} s turn limit`
+        : reason === "cancelled"
+          ? "The MCP client cancelled the Codex call"
+          : "The MCP client disconnected";
+      const message = `${what}; the bridge sent SIGTERM to Codex (pid ${child.pid}) and sends SIGKILL if it is still running after ${TERMINATE_GRACE_MS} ms.`;
+      logLine(message);
+      onProgress(message);
+      child.kill("SIGTERM");
+      killTimer = setTimeout(() => {
+        if (child.exitCode !== null || child.signalCode !== null) return;
+        stopping.signals.push("SIGKILL");
+        const killed = `Codex (pid ${child.pid}) was still running ${TERMINATE_GRACE_MS} ms after SIGTERM; the bridge sent SIGKILL.`;
+        logLine(killed);
+        onProgress(killed);
+        child.kill("SIGKILL");
+      }, TERMINATE_GRACE_MS);
+      killTimer.unref?.();
+    };
+    const run = { stop };
+    activeCodexRuns.add(run);
+    if (turnLimit) {
+      deadlineTimer = setTimeout(() => stop("turn_limit"), Math.max(0, turnLimit.deadlineAt - Date.now()));
+      deadlineTimer.unref?.();
+    }
+    const onAbort = () => stop("cancelled");
+    signal?.addEventListener("abort", onAbort, { once: true });
+    const finishStop = () => {
+      activeCodexRuns.delete(run);
+      clearTimeout(deadlineTimer);
+      clearTimeout(killTimer);
+      signal?.removeEventListener("abort", onAbort);
+    };
     let buffer = "";
     let stderr = "";
     let sessionId = threadId || null;
@@ -211,11 +289,24 @@ function runCodexAttempt({ prompt, cwd, sandbox, approvalPolicy, config = {}, mo
       for (const line of lines) consume(line);
     });
     child.stderr.on("data", (chunk) => { stderr += chunk; });
-    child.on("error", rejectPromise);
-    child.on("close", (code, signal) => {
+    child.on("error", (error) => {
+      finishStop();
+      rejectPromise(error);
+    });
+    child.on("close", (code, exitSignal) => {
+      finishStop();
       consume(buffer);
+      if (stopping) {
+        const exit = `${stopping.signals.join(", then ")}; it exited with ${code ?? exitSignal}`;
+        if (stopping.reason === "turn_limit") {
+          rejectPromise(turnLimitError(turnLimit, exit));
+        } else {
+          rejectPromise(new Error(`Codex call was stopped because ${stopping.reason === "cancelled" ? "the MCP client cancelled it" : "the MCP client disconnected"}; the bridge sent Codex ${exit}.`));
+        }
+        return;
+      }
       if (code !== 0 || eventError) {
-        const error = new Error(clipped(eventError || stderr.trim() || `Codex exited with ${code ?? signal}.`));
+        const error = new Error(clipped(eventError || stderr.trim() || `Codex exited with ${code ?? exitSignal}.`));
         error.modelOverloaded = isModelOverload(error.message);
         rejectPromise(error);
         return;
@@ -251,6 +342,8 @@ async function runCodex({
   threadId,
   verificationCommands = [],
   onProgress,
+  timeoutSeconds,
+  signal = null,
 }) {
   let configured;
   if (fallbackModels === undefined) {
@@ -275,6 +368,14 @@ async function runCodex({
   }
   const candidates = [machineModelPolicy.model || null, ...configured]
     .filter((candidate, index, values) => values.indexOf(candidate) === index);
+  // One wall-clock limit for the whole call: turnTimeoutSeconds per permitted model
+  // attempt, the same bound the collaboration broker uses for its own deadline.
+  const turnLimit = timeoutSeconds === undefined ? null : {
+    timeoutSeconds,
+    attempts: candidates.length,
+    budgetSeconds: timeoutSeconds * candidates.length,
+    deadlineAt: Date.now() + timeoutSeconds * 1000 * candidates.length,
+  };
   const attemptedModels = [];
   const originalThreadId = threadId || null;
   let activeThreadId = originalThreadId;
@@ -295,6 +396,8 @@ async function runCodex({
         threadId: activeThreadId,
         verificationCommands,
         onProgress,
+        turnLimit,
+        signal,
       });
       return {
         ...result,
@@ -344,6 +447,9 @@ const newTurnInput = {
     "Ordered models to try only when Codex reports that the current model is overloaded. Omit to use ~/.config/local-agent-bridge/model-fallbacks.json; pass [] to disable configured fallbacks.",
   ),
   verificationCommands: z.array(z.string().trim().min(1).max(500)).max(20).default([]),
+  timeoutSeconds: z.number().int().min(1).max(14400).optional().describe(
+    "Wall-clock limit for this turn per permitted model attempt. At the limit the bridge stops Codex (SIGTERM, then SIGKILL after a grace period) and returns a timeout error. Omit for no bridge-side limit.",
+  ),
 };
 
 async function runWithProgress(input, extra, threadId) {
@@ -357,18 +463,29 @@ async function runWithProgress(input, extra, threadId) {
       params: { progressToken: token, progress, message },
     }).catch(() => {});
   };
-  return runCodex({
-    prompt: input.prompt,
-    cwd: input.cwd || ".",
-    sandbox: input.sandbox || "read-only",
-    approvalPolicy: input["approval-policy"] || "never",
-    config: input.config,
-    model: input.model,
-    fallbackModels: input.fallbackModels,
-    threadId,
-    verificationCommands: input.verificationCommands || [],
-    onProgress: notify,
-  });
+  const startedAt = Date.now();
+  const heartbeat = setInterval(() => {
+    notify(`Codex is still working (${Math.round((Date.now() - startedAt) / 1000)}s heartbeat).`);
+  }, HEARTBEAT_MS);
+  heartbeat.unref?.();
+  try {
+    return await runCodex({
+      prompt: input.prompt,
+      cwd: input.cwd || ".",
+      sandbox: input.sandbox || "read-only",
+      approvalPolicy: input["approval-policy"] || "never",
+      config: input.config,
+      model: input.model,
+      fallbackModels: input.fallbackModels,
+      threadId,
+      verificationCommands: input.verificationCommands || [],
+      onProgress: notify,
+      timeoutSeconds: input.timeoutSeconds,
+      signal: extra?.signal || null,
+    });
+  } finally {
+    clearInterval(heartbeat);
+  }
 }
 
 function toolResponse(result) {
@@ -393,5 +510,22 @@ server.registerTool("codex-reply", {
     ...newTurnInput,
   },
 }, async ({ threadId, ...input }, extra) => toolResponse(await runWithProgress(input, extra, threadId)));
+
+// Stop owned Codex processes when the MCP client goes away (stdin closes or the
+// client's transport sends SIGTERM) instead of orphaning them, then exit.
+let shuttingDown = false;
+function shutdown(reason, exitCode) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  if (activeCodexRuns.size) logLine(`${reason}; stopping ${activeCodexRuns.size} running Codex process(es).`);
+  for (const run of activeCodexRuns) run.stop("disconnected");
+  const exitWhenIdle = setInterval(() => {
+    if (!activeCodexRuns.size) process.exit(exitCode);
+  }, 50);
+  setTimeout(() => process.exit(exitCode), TERMINATE_GRACE_MS + 1_000).unref();
+  exitWhenIdle.unref?.();
+}
+process.stdin.once("end", () => shutdown("MCP client closed stdin", 0));
+process.once("SIGTERM", () => shutdown("Received SIGTERM", 143));
 
 await server.connect(new StdioServerTransport());

@@ -28,6 +28,11 @@ function matches(reason, pattern) {
 export function classifyProviderFailure(errorOrReason) {
   const reason = errorOrReason?.message || String(errorOrReason || "Unknown provider failure.");
   if (errorOrReason?.indeterminate) return PROVIDER_FAILURE_CLASSES.INDETERMINATE;
+  // A provider-enforced turn limit is a definite stop. Classify it before the
+  // status-code patterns so a limit such as "429 s" cannot read as quota or capacity.
+  if (matches(reason, /delegation timed out after the [\d.]+ s turn limit/i)) {
+    return PROVIDER_FAILURE_CLASSES.TRANSPORT;
+  }
 
   // Classify deterministic failures before capacity language. Adapter errors such
   // as "model unavailable: --effort is required" must not enter a capacity loop.

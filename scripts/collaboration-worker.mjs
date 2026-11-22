@@ -369,6 +369,8 @@ try {
     });
   }
 
+  const configuredGraceMs = Number(process.env.BRIDGE_PROVIDER_DEADLINE_GRACE_MS);
+  const providerDeadlineGraceMs = Number.isInteger(configuredGraceMs) && configuredGraceMs > 0 ? configuredGraceMs : null;
   pool = createAgentPool({
     root: runtimeRoot,
     workspace: state.workspace,
@@ -384,7 +386,8 @@ try {
     githubReview: state.githubReview || null,
     githubBuilder: state.githubBuilder || null,
     turnTimeoutSeconds: state.turnTimeoutSeconds || 600,
-    requestTimeoutMs: (state.turnTimeoutSeconds || 600) * 1000 + 5_000,
+    // The MCP client deadline follows turnTimeoutSeconds; tests may shorten the grace.
+    ...(providerDeadlineGraceMs ? { providerDeadlineGraceMs } : {}),
     // The collaboration worker is the autonomous council/portfolio/take-the-helm
     // execution path: delivery must be fail-closed to a bound githubBuilder.
     autonomous: true,

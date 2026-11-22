@@ -18,7 +18,7 @@ const sharedInput = {
   mode: z.enum(["review", "work"]).default("review").describe("Docker Model Runner is review-only; work is rejected."),
   model: z.string().trim().min(1).optional().describe("Optional Docker Model Runner model. Omit to use machine configuration."),
   fallbackModels: z.array(z.string().trim().min(1)).max(5).optional().describe("Ordered local Docker models used only for memory/capacity failures."),
-  timeoutSeconds: z.number().int().min(10).max(7200).default(1800),
+  timeoutSeconds: z.number().int().min(10).max(14400).default(1800),
 };
 
 function toolResponse(result, conversationId) {
