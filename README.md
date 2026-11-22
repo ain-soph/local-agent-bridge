@@ -8,6 +8,7 @@
 > | Antigravity Orchestrator routes `orchestrator:<planner-route>+<executor-route>` | agy 1.5.14 sets planner/executor model + effort in the `orchestrator` setting (labels, not IDs) | `AGY_MODEL` or per-call `model` (off) | `--model <Orchestrator id> --settings '{"orchestrator":{...}}'`, session only |
 > | Capability probe: `--settings`, effort levels, `agy models` labels (cache schema 8) | needed by the two rows above | always | — |
 > | `BRIDGE_CODEX_MODEL` / `BRIDGE_CODEX_REASONING_EFFORT` | delegated Codex can differ from interactive Codex without editing `~/.codex/config.toml` | env (off) | overrides the delegated `config.toml` |
+> | Writer checkout sees every origin branch | the private clone only mapped the source's local branches to `origin/*` | always | copies the source's `refs/remotes/origin/*`, then `git fetch origin` (best effort, 60 s) |
 >
 > Upstream PRs: none.
 
